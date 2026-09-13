@@ -217,6 +217,13 @@ The Mac's driver log confirms it independently: a working stream logs
 `session router: creating route ... address=<linux-host>:<port>` as the sender
 starts, and `removing session` when it ends.
 
+## Where this is going: the brain interface
+
+The speech engine is the only part of this package that knows about a specific product.
+`docs/brain-interface.md` describes the small contract - five subcommands, JSON on stdout - that
+would let a local Whisper, a cloud STT service or a future Linux client take its place without
+touching capture, transport or delivery.
+
 ## Verifying the delivery layer (no microphone, no Flow)
 
 `~/bin/type-harness.sh` types a test string through the same `wtype` path dictation uses and
