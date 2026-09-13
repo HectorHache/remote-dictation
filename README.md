@@ -24,7 +24,7 @@ roc-send -i pulse://dictation_mic ----------+            v
                                 RTP + rs8m FEC     flow.sqlite  History row
   ^                                                      |
   |                                            ssh poll (readonly)
-  +---- wtype types the transcript into the focused window
+  +---- clipboard paste (or wtype) delivers it into the focused window
 ```
 
 ## What you need first
@@ -146,6 +146,7 @@ The keys that matter:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `DICTATE_DELIVERY` | `auto` | `auto` pastes via the clipboard when possible (exact bytes: accented characters wtype cannot type, atomic for long text); `type` forces wtype |
 | `DICTATE_NEWLINE` | `space` | `enter` would submit a chat prompt - keep `space` unless you want that |
 | `DICTATE_TYPE_DELAY` | `6` | ms between keystrokes; raise to 8 if letters go missing |
 | `DICTATE_TAIL_GRACE` | `0.5` | seconds of extra recording after release |
@@ -221,6 +222,12 @@ starts, and `removing session` when it ends.
 `~/bin/type-harness.sh` types a test string through the same `wtype` path dictation uses and
 tells you whether it arrived byte-identical. It exists because it caught a delivery regression
 in one run that reading the code twice did not.
+
+`~/bin/paste-harness.sh` does the same for the clipboard-paste path: it puts a test string on
+the clipboard, sends Ctrl+V into a real GTK entry (zenity) and compares what arrived. Its
+default string is deliberately full of accents - `Mañana, ¿qué tal? Ñandú añejo, áéíóú, ü ü` -
+because accented characters are exactly what wtype cannot deliver and why this path exists.
+Both harnesses open one window for about ten seconds and close it again.
 
 **It opens a terminal window** (one window, about ten seconds, closed again at the end), so run
 it deliberately rather than in the middle of something:

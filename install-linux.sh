@@ -27,7 +27,7 @@ SCONS="$HOME/.local/share/roc-venv/bin/scons"
 MARK_BEGIN='-- >>> remote-dictation (managed block: safe to delete) >>>'
 MARK_END='-- <<< remote-dictation (managed block) <<<'
 
-SCRIPT_FILES=(dictate.sh dictation-mic.sh roc-stream.sh type-harness.sh)
+SCRIPT_FILES=(dictate.sh dictation-mic.sh roc-stream.sh type-harness.sh paste-harness.sh )
 STATE_FILES=("$HOME/.dictation-capture-orig" "$HOME/.dictation-src-fader" \
              "$HOME/.dictation-src-mute" "$HOME/.dictation-default-source" \
              "$HOME/.dictation-remote-db")
@@ -83,6 +83,7 @@ preflight() {
   for c in pactl amixer ssh; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
   [ ${#missing[@]} -eq 0 ] || die "missing commands: ${missing[*]} (need pipewire-pulse, alsa-utils, openssh)"
   command -v wtype >/dev/null 2>&1 || warn "wtype is missing - delivering text into the focused window needs it"
+  command -v wl-copy >/dev/null 2>&1 || warn "wl-clipboard is missing - the exact-bytes paste path (accents, long text) needs it; install wl-clipboard to enable it"
   command -v hyprctl >/dev/null 2>&1 || warn "hyprctl is missing - not a Hyprland session? the keybind step is skipped"
   pactl info >/dev/null 2>&1 || die "pactl cannot reach the audio server (is PipeWire running?)"
   ok "Linux, audio server and package layout look right"
@@ -277,6 +278,12 @@ DICTATE_NOTIFY_URGENCY=normal
 # space | enter
 DICTATE_NEWLINE=space
 
+# How the transcript reaches the focused window. "auto" pastes via the clipboard when
+# the session supports it (exact bytes - accented characters wtype cannot type - and
+# atomic for long text), and types with wtype when it does not.
+# auto | paste | type
+#DICTATE_DELIVERY=auto
+
 # The real mic's SOFTWARE fader while dictating. The Dictation Mic is built from
 # that source, so this is the useful level control: 0% is silence, 50%+ clips.
 # 20-25% measures clean. Your own value is saved and restored on release.
@@ -314,7 +321,7 @@ install_bind() {
 $MARK_BEGIN
 -- Remote dictation: push-to-talk, transcribed by Wispr Flow on the Mac Mini.
 -- Voice: internal mic -> Dictation Mic -> roc-send -> tailnet -> Mac -> Flow.
--- Text:  flow.sqlite -> wtype -> the focused window on this Linux machine.
+-- Text:  flow.sqlite -> clipboard paste (or wtype) -> the focused window here.
 o.bind("F9", "Dictate (push-to-talk)", "$BIN_DIR/dictate.sh start")
 o.bind("F9", "Dictate (push-to-talk)", "$BIN_DIR/dictate.sh stop", { release = true })
 $MARK_END

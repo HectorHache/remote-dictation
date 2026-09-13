@@ -6,7 +6,7 @@
 #
 # Voice path: internal mic -> Dictation Mic (PipeWire) -> roc-send -> tailnet
 #             -> Roc receiver on the Mac -> Wispr Flow -> flow.sqlite History row
-# Text path:  History row -> wtype -> whatever window has focus on the Linux machine
+# Text path:  History row -> clipboard paste (or wtype) -> whatever window has focus here
 set -u
 # Derived from OUR uid: hardcoding /run/user/1000 breaks on every account that is not
 # uid 1000, which is most of them.
@@ -26,7 +26,11 @@ if [ -f "$HOME/.config/dictation.conf" ]; then
   set +a
 fi
 
-DELIVERY="${DICTATE_DELIVERY:-type}"       # type | paste
+# Delivery: "auto" pastes through the clipboard when the session can do it (exact bytes,
+# including accents wtype cannot type, and atomic for long text), and falls back to typing
+# if wl-clipboard or Hyprland is missing. Force one with paste/type.
+DELIVERY="${DICTATE_DELIVERY:-auto}"       # auto | paste | type
+DELIVERED_BY=""
 TYPE_DELAY="${DICTATE_TYPE_DELAY:-0}"      # ms between keystrokes
 TAIL_GRACE="${DICTATE_TAIL_GRACE:-0.5}"    # seconds to keep recording after release
 URGENCY="${DICTATE_NOTIFY_URGENCY:-normal}"
@@ -313,9 +317,50 @@ stop)
     if [ "$TYPE_DELAY" -gt 0 ]; then wtype -d "$TYPE_DELAY" -- "$1"; else wtype -- "$1"; fi
   }
 
-  type_seg "$TXT "
+  # Clipboard-paste delivery (2026-09-13). wtype types ASCII reliably but cannot produce
+  # accented characters at all and its cost grows with the length of the transcript; a
+  # clipboard + Ctrl+V is exact bytes, instant, and atomic.
+  #
+  # The shortcut is the fiddly part. The classic dispatcher takes a COMMA
+  # (`sendshortcut "CTRL,V,"`), and on a Lua-configured Hyprland (Omarchy 4.x, Hyprland
+  # 0.56.2) the Lua shim splices that argument unquoted and dies with
+  # "'(' expected near 'CTRL'". The Lua form works there. Both are tried, so this runs on
+  # either flavour.
+  paste_ready() {
+    command -v wl-copy >/dev/null 2>&1 || return 1
+    command -v hyprctl >/dev/null 2>&1 || return 1
+    return 0
+  }
+  paste_seg() {
+    local out
+    printf '%s' "$1" | wl-copy --type text/plain >/dev/null 2>&1 || return 1
+    # Let the selection be owned before the shortcut fires, or the paste arrives empty.
+    sleep "${DICTATE_PASTE_SETTLE:-0.15}"
+    out=$(hyprctl dispatch 'hl.dsp.send_shortcut({mods="CTRL",key="V"})' 2>/dev/null)
+    case "$out" in ok*) return 0 ;; esac
+    out=$(hyprctl dispatch sendshortcut "CTRL,V," 2>/dev/null)
+    case "$out" in ok*) return 0 ;; esac
+    return 1
+  }
+  deliver() {
+    local how=type
+    case "$DELIVERY" in
+      paste) how=paste ;;
+      type)  how=type ;;
+      *)     if paste_ready; then how=paste; else how=type; fi ;;
+    esac
+    if [ "$how" = paste ] && paste_seg "$1"; then
+      DELIVERED_BY=paste
+      return 0
+    fi
+    # Never lose a transcript to a failed paste: type it instead.
+    type_seg "$1"
+    DELIVERED_BY=type
+  }
+
+  deliver "$TXT "
   T2=$(now_ms)
-  echo "release_to_row=$(( T1 - T0 ))ms row_to_typed=$(( T2 - T1 ))ms total=$(( T2 - T0 ))ms chars=${#TXT}" >> "$TIMING"
+  echo "release_to_row=$(( T1 - T0 ))ms row_to_typed=$(( T2 - T1 ))ms total=$(( T2 - T0 ))ms chars=${#TXT} via=$DELIVERED_BY" >> "$TIMING"
   notify_dismiss
   notify "Delivered: $TXT"
   ;;
