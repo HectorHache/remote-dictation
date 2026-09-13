@@ -6,8 +6,11 @@ window has focus. Flow has no Linux client; this package does not need one.
 
 The microphone audio travels over the tailnet to a Mac, where a virtual audio
 device presents it to Wispr Flow. The transcript comes back through Flow's own
-local database. Nothing but audio leaves the Linux machine, and only while a key is
-held.
+local database. Nothing but audio ever leaves the Linux machine - no files, no
+transcripts, no telemetry - and the microphone it captures is muted whenever the key
+is not held. (The sender stays attached between presses: that is what makes a warm
+press ~260 ms instead of a full rebuild, and what the "roc-send killed while idle"
+row in Failure modes costs you.)
 
 ```
 Linux machine                                    Mac (tailnet)

@@ -4,6 +4,9 @@
 # The LD_LIBRARY_PATH workaround is for roc-toolkit issue #838: the sox backend has a
 # hard 256-driver cap and Arch's sox_ng registers more, so roc-send panics on startup.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# Settings come from the same file the keybind uses. This script is also run by hand
+# (and under nohup from dictate.sh), so it must not depend on being handed an environment.
+[ -f "$HOME/.config/dictation.conf" ] && . "$HOME/.config/dictation.conf"
 # Prefer the private build (install-linux.sh): it has the SoX backend disabled,
 # which retires roc-toolkit issue #838. Fall back to the system package plus the
 # old-sox LD_LIBRARY_PATH hack if that build is not present.

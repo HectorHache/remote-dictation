@@ -16,7 +16,15 @@ export OMARCHY_PATH="${OMARCHY_PATH:-/usr/share/omarchy}"
 
 # User-tunable settings. The keybind runs this with the COMPOSITOR's environment, not
 # your shell's, so exported variables in ~/.zshrc never reach it. This file does.
-[ -f "$HOME/.config/dictation.conf" ] && . "$HOME/.config/dictation.conf"
+# `set -a` around the source: the children this script launches (roc-stream.sh,
+# dictation-mic.sh) are separate processes, and a config value that is only a shell
+# variable here silently disappears there - which is how an empty DICTATE_MAC turned
+# into "cannot resolve the Mac host ''" in /tmp/roc-send.log while Flow still armed.
+if [ -f "$HOME/.config/dictation.conf" ]; then
+  set -a
+  . "$HOME/.config/dictation.conf"
+  set +a
+fi
 
 DELIVERY="${DICTATE_DELIVERY:-type}"       # type | paste
 TYPE_DELAY="${DICTATE_TYPE_DELAY:-0}"      # ms between keystrokes
