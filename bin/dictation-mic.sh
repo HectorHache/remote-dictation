@@ -11,6 +11,14 @@
 #            source so the desktop UI shows it, Bluetooth untouched (stays A2DP)
 #   release: levels and your previous source restored, both mics muted again
 #
+# The AEC filter's REFERENCE SINK is pinned by resolve_sink_master(). Left unset, PipeWire
+# attaches the filter's playback side to the DEFAULT sink, which may be a removable device:
+# on 2026-09-13 the default was a Bluetooth headset whose nodes were erroring every ~2s
+# ("suspended -> error", "Start error: Input/output error"), so the filter produced no
+# frames at all, Dictation Mic fed silence, roc-send logged "stream timeout expired" from
+# the moment it started, and TWO dictations returned nothing while every check on both
+# ends - device present, endpoints bound, receiver answering - stayed green.
+#
 # The device is NOT unloaded on release: unloading it kills roc-send, and a full rebuild
 # measures ~10.4s of dead air. Keeping it warm costs nothing because it is muted.
 set -u
@@ -23,6 +31,7 @@ GAIN="${MIC_GAIN:-140}"              # our own fader on the Dictation Mic
 HW_GAIN="${MIC_HW_GAIN:-70%}"        # hardware capture gain (+11 dB, not +30 dB)
 SRC_LEVEL="${MIC_SRC_LEVEL:-20%}"    # real mic's software fader while dictating
 MUTE_IDLE="${MIC_MUTE_IDLE:-1}"      # 1 = mute the real mic whenever not dictating
+SINK_MASTER="${MIC_SINK_MASTER:-}"   # empty = derive from the mic's own card (below)
 
 STATE="$HOME/.dictation-capture-orig"
 FADER_STATE="$HOME/.dictation-src-fader"
@@ -49,6 +58,26 @@ wait_for_node() {
   return 1
 }
 
+# Which sink should the echo-canceller use as its AEC reference?
+# PREference order, and why the first one wins in practice:
+#   1. MIC_SINK_MASTER from ~/.config/dictation.conf (escape hatch);
+#   2. the sink on the MIC'S OWN CARD - derive it by name (alsa_input.<card> -> alsa_output.<card>).
+#      Always present, and the correct reference when the user DOES use the laptop speakers
+#      (with headphones the mic cannot hear them anyway, so the reference is moot);
+#   3. any local (non-Bluetooth) sink;
+#   4. the current default sink - the pre-2026-09-13 behaviour, kept only as a last resort
+#      because the default can be a device that comes and goes.
+resolve_sink_master() {
+  [ -n "$SINK_MASTER" ] && { printf '%s' "$SINK_MASTER"; return; }
+  local cand="${MASTER/alsa_input./alsa_output.}"
+  if pactl list short sinks 2>/dev/null | awk -v n="$cand" '$2==n{f=1} END{exit !f}'; then
+    printf '%s' "$cand"; return
+  fi
+  cand=$(pactl list short sinks 2>/dev/null | awk '$2 ~ /^alsa_output\./ {print $2; exit}')
+  [ -n "$cand" ] && { printf '%s' "$cand"; return; }
+  pactl get-default-sink 2>/dev/null
+}
+
 start() {
   # ORDER MATTERS. Everything that makes audio flow comes first, so the microphone is
   # live within ~200ms of the keypress; verification loops that only matter if something
@@ -70,8 +99,11 @@ start() {
     # Prefer WebRTC processing: a high-pass filter plus noise suppression. Wind noise is
     # overwhelmingly low-frequency, and unfiltered it defeats speech detection entirely
     # (observed: 155s of captured audio, zero words, detectedLanguage NULL).
+    local sm smargs=()
+    sm=$(resolve_sink_master)
+    [ -n "$sm" ] && smargs=("sink_master=$sm")
     if ! pactl load-module module-echo-cancel \
-            source_name="$NAME" source_master="$MASTER" \
+            source_name="$NAME" source_master="$MASTER" "${smargs[@]}" \
             aec_method=webrtc \
             aec_args="high_pass_filter=1 noise_suppression=1 analog_gain_control=0 digital_gain_control=0" \
             source_properties="device.description=Dictation Mic" >/dev/null 2>&1; then
@@ -153,7 +185,7 @@ case "${1:-}" in
   start) start ;;
   stop)  stop ;;
   status)
-    echo "node=$(node_exists && echo present || echo absent) fader=$(pactl get-source-volume "$NAME" 2>/dev/null | head -1 | awk -F/ '{print $2}' | tr -d ' ') source_fader=$(read_fader) source_mute=$(read_mute) default=$(pactl get-default-source 2>/dev/null)"
+    echo "node=$(node_exists && echo present || echo absent) fader=$(pactl get-source-volume "$NAME" 2>/dev/null | head -1 | awk -F/ '{print $2}' | tr -d ' ') source_fader=$(read_fader) source_mute=$(read_mute) default=$(pactl get-default-source 2>/dev/null) sink_master=$(resolve_sink_master) aec_link=$(pw-link -l 2>/dev/null | grep -A1 "echo-cancel-playback:output_FL" | tail -1 | awk '{print $2}')"
     ;;
   *) echo "usage: $0 start|stop|status" ;;
 esac

@@ -66,6 +66,53 @@ notify() {
 notify_dismiss() { omarchy-notification-dismiss "Dictation" >/dev/null 2>&1; }
 restore_machine() { "$HOME/bin/dictation-mic.sh" stop >/dev/null 2>&1; }
 
+# Is the attached streamer worth reusing, or should it be rebuilt?
+# It is deliberately kept attached between dictations (~260ms warm vs ~2.7s rebuild), but
+# "attached" is NOT "healthy": a sender whose capture stream starved stays alive and gets
+# reused forever, so ONE bad start poisons every later press. That is exactly what happened
+# on 2026-09-13 - the echo-canceller's playback side was linked to a flapping Bluetooth
+# sink, the sender starved from birth at 14:45, and both of Mick's dictations streamed
+# silence while every check stayed green. Unhealthy => take the cold path, which rebuilds.
+SENDER_MAX_AGE="${DICTATE_SENDER_MAX_AGE:-1800}"   # seconds; bound how long drift can hide
+sender_healthy() {
+  local pid ip cmd log age
+  pid=$(pgrep -x roc-send 2>/dev/null | head -1)
+  [ -n "$pid" ] || return 1
+  # 1. aimed at the Mac we are about to arm (a config change leaves an old target behind)
+  ip=$(getent ahostsv4 "$MAC" 2>/dev/null | awk 'NR==1{print $1}')
+  cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+  case "$cmd" in *"rtp+rs8m://${ip:-$MAC}:10001"*) ;; *) return 1 ;; esac
+  # 2. not starved: a starving sender repeats "stream timeout expired" every ~2s, so the
+  #    tail of its log is the cheapest honest signal that its capture is dead. No pipelines
+  #    here on purpose - this machine runs `set -u`, and `cmd | grep -q` is a trap.
+  [ -s /tmp/roc-send.log ] || return 1
+  log=$(tail -2 /tmp/roc-send.log)
+  case "$log" in *"stream timeout expired"*) return 1 ;; esac
+  # 3. not ancient: bound the age so an unnoticed drift cannot hide in a live process
+  age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+  [ -n "$age" ] && [ "$age" -lt "$SENDER_MAX_AGE" ] || return 1
+  return 0
+}
+
+# What is the capture actually carrying? "Something is wrong" is not actionable, and on
+# 2026-09-13 the gap between "No transcript captured" and a named cause was a three-layer
+# hunt through PipeWire, the AEC filter and the BlueZ stack. Measured on this machine:
+#   armed, mic live     -> signal (mean -54.4 dB / max -28.4 dB)
+#   armed, mic muted    -> all bytes zero (-91.0 dB)
+#   AEC reference dead  -> all bytes zero while frames keep arriving (measured 2026-09-13)
+# so all-zero while ARMED is unambiguous: the script unmuted the microphone at press time,
+# so silence at that point means nothing is leaving the mic. States: ok | silent | dead.
+# TRAP: --latency-msec=5 is REQUIRED. parec's default buffering is ~2.4s, so a 1s timeout
+# returns ZERO bytes and every reading looks like "dead" (measured: 0 bytes in 1s, 33 kB
+# in 1.2s with the latency set). Buffering is not latency.
+capture_state() {
+  local raw
+  raw=$(timeout 1.2 parec --latency-msec=5 --device=dictation_mic --format=s16le --rate=48000 --channels=1 2>/dev/null \
+        | head -c 8192 | od -An -v -tu1)
+  [ -n "${raw// /}" ] || { echo dead; return; }   # no frames at all: the stream stalled
+  case "$raw" in *[1-9]*) echo ok ;; *) echo silent ;; esac
+}
+
 # ssh -n is required: without it these calls read the caller's stdin and swallow it.
 mac()  { ssh -n -o BatchMode=yes -o ConnectTimeout=8 "$MAC" "$@"; }
 remote_db() {
@@ -86,7 +133,9 @@ ensure_chain() {
   # ALWAYS call start: the device stays loaded and warm between dictations but is MUTED,
   # so start is what brings the microphone up, sets levels and selects the device.
   "$HOME/bin/dictation-mic.sh" start >/dev/null 2>&1
-  if ! pgrep -x roc-send >/dev/null; then
+  if ! sender_healthy; then
+    pkill -x roc-send 2>/dev/null      # drop a starved or misdirected sender first
+    sleep 0.2
     : >/tmp/roc-send.log
     nohup "$HOME/bin/roc-stream.sh" >>/tmp/roc-send.log 2>&1 &
     # NO WAIT, and that is a measured decision, not an omission. 2026-09-13:
@@ -115,11 +164,11 @@ start)
   T0=$(now_ms)
   # Immediate feedback, before any waiting: a cold start takes seconds and silence reads as
   # "the key did nothing". Replaced by the Listening toast once Flow is armed.
-  pgrep -x roc-send >/dev/null || notify "Connecting... (release F9 when done)" critical
+  sender_healthy || notify "Connecting... (release F9 when done)" critical
   # History.timestamp is the SESSION START, which can share a second with our marker,
   # so the marker is the current max rowid instead - exact and monotonic. Rows are only
   # written when the session ENDS, so reading it at any point before release is safe.
-  if pgrep -x roc-send >/dev/null; then
+  if sender_healthy; then
     # WARM (the normal case). Two SSH round trips used to sit in front of the local audio
     # setup and cost ~1.3s end to end, during which the opening word was lost. Now the
     # remote arming runs CONCURRENTLY with the local level setup, and the marker query
@@ -180,6 +229,13 @@ start)
   echo "press_to_armed=$(( $(now_ms) - T0 ))ms" >> "$TIMING"
   notify_dismiss
   notify "Listening... (release F9 when done)" critical
+  # Watch the capture WHILE the user speaks, in the background so it costs the press path
+  # nothing. Silence at this point is a real fault (the mic was just unmuted), so we name
+  # it at give-up time instead of a bare "No transcript captured" - the difference between
+  # a three-layer hunt and a one-line answer.
+  rm -f /tmp/dictate-capture-state
+  ( sleep 0.6; st=$(capture_state); [ "$st" = ok ] || { printf '%s\n' "$st" > /tmp/dictate-capture-state
+      echo "$(date +%H:%M:%S) capture=$st while armed" >> /tmp/dictate-timing.log; } ) >/dev/null 2>&1 &
   ;;
 stop)
   # The restore is filed BEFORE any early-out, so a release always puts the machine back
@@ -212,9 +268,15 @@ stop)
   done
   T1=$(now_ms)
   if [ -z "$TXT" ]; then
-    echo "release_to_giveup=$(( T1 - T0 ))ms (no transcript)" >> "$TIMING"
+    cstate=; [ -f /tmp/dictate-capture-state ] && cstate=$(cat /tmp/dictate-capture-state)
+    rm -f /tmp/dictate-capture-state
+    echo "release_to_giveup=$(( T1 - T0 ))ms (no transcript${cstate:+, capture=$cstate})" >> "$TIMING"
     notify_dismiss
-    notify "No transcript captured"
+    case "$cstate" in
+      silent) notify "No transcript - no audio left the microphone (check it is not muted)" ;;
+      dead)   notify "No transcript - the audio pipeline stalled (reload with dictation-mic.sh stop, then press again)" ;;
+      *)      notify "No transcript captured" ;;
+    esac
     exit 1
   fi
   # A newline in the transcript becomes a Return keystroke, and in a chat or agent

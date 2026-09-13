@@ -153,6 +153,8 @@ The keys that matter:
 | `MIC_GAIN` | `140` | the Dictation Mic's own fader |
 | `MIC_MASTER` / `MIC_CARD` | detected | which source to capture, and its ALSA card |
 | `MIC_MUTE_IDLE` | `1` | mute the real mic whenever not dictating |
+| `MIC_SINK_MASTER` | derived | the echo-canceller's reference sink. Derived from the mic's own card (`alsa_input.X` -> `alsa_output.X`); set it only if that card has no matching output. Read the failure-mode table before letting this float |
+| `DICTATE_SENDER_MAX_AGE` | `1800` | seconds; a streamer older than this is rebuilt on the next press |
 | `DICTATE_MAC` | *required* | ssh host of the brain (must resolve over the tailnet). No default ships with the package: `install-linux.sh --mac HOST` writes it |
 | `DICTATE_MAC_IP` | unset | pins the Mac's address instead of resolving `DICTATE_MAC` |
 | `DICTATE_DB` | derived | Flow's database on the Mac. Derived from the **remote** `$HOME` on first use and cached; set it only for a non-standard install |
@@ -181,11 +183,13 @@ Measured on the reference pair (Omarchy machine, M4 Pro Mac mini, Tailscale):
 | Mac unreachable / asleep | press fails in ~0.9 s (measured 855 ms), microphone re-muted, no text, toast says so. **Cold presses used to report success** - that gap was found and fixed on 2026-09-13 |
 | `roc-send` killed while idle | next press rebuilds it (device bring-up + streamer, ~1 s; the first words are not lost because audio starts ~250 ms after arming) |
 | capture device removed (on the Linux side) | next press rebuilds device and stream |
+| **the AEC reference sink follows your default sink** | leave `sink_master` unset and PipeWire attaches the echo-canceller's playback side to the *default* sink. If that is a removable device (Bluetooth), a BlueZ hiccup stops the filter producing frames entirely: the microphone is fine, both `--check`s pass, the receiver answers, and dictation delivers silence. The reference is now pinned to the mic's own card. Diagnose with `dictation-mic.sh status`: `aec_link=` must name a local sink, not a Bluetooth one. Found 2026-09-13, after two dictations returned nothing |
+| a streamer whose capture starved from birth | it stays alive and used to be reused forever, so **one bad start poisoned every later press**. The press path now checks it - alive, aimed at the right address, not currently starving, not ancient - and rebuilds it when unhealthy |
 | **receiver device removed (Mac)** | a press still arms Flow and delivers nothing. The Mac's `--check` reports the missing device; the Linux machine's now does too. Flow itself silently falls back to whichever input it can find, so a transcript may arrive from the *Mac's* room - not a failure mode you can detect from the Linux machine alone |
 | Flow not running | the URL scheme relaunches it |
 | Flow busy at start-up (marker unreadable) | retried once, then a clean failure - never silently becomes "row 0" |
 | Flow logged out | trigger accepted, no transcript, release reports no transcript. Not literally tested - restoring a login needs your credentials, so I did not touch it; it collapses into the verified "no transcript" branch above |
-| no transcript at all | release polls for ~7 s (15 ssh round trips, was 40 = 15.3 s) before saying "No transcript captured" |
+| no transcript at all | release polls for ~7 s (15 ssh round trips, was 40 = 15.3 s), then names the cause when it can: the press watches the capture in the background, so it says "no audio left the microphone" (armed and digitally silent) or "the audio pipeline stalled" (no frames) instead of a bare "No transcript captured" |
 | a failed `device bind` (an already-bound slot; also what a device left behind by a rename causes) | it tears the **live** receiver down and then fails: the endpoint list still looks right in `device show`, but nothing is listening - the device is silently dead. Repair with `install-macos.sh --rebind`, and the installer now recovers on its own, by recreating the device, whenever a bind fails |
 
 ## Verifying the audio path without speaking
@@ -231,6 +235,15 @@ It refuses to type unless it can verify the scratch window is the focused one, b
 exactly how a test string ends up in someone's editor otherwise.
 
 ## Traps worth knowing (the short list)
+
+- **An echo-canceller's reference sink must not be left floating.** Unset, it
+  follows the *default* sink; if that is a Bluetooth headset, the filter's
+  playback side is attached to the headset, and a BlueZ error storm
+  (`suspended -> error`, `Start error: Input/output error`) then stops the
+  filter emitting frames at all - the microphone is healthy and every check on
+  both ends passes while Flow receives silence. Pin it (`sink_master=`, i.e.
+  `MIC_SINK_MASTER`), and read `aec_link=` in `dictation-mic.sh status`. Verified
+  2026-09-13.
 
 - macOS installers that extract with `tar -xP` **always exit non-zero** on
   modern macOS: `/usr` and `/Library` are firmlinks and cannot be created.
