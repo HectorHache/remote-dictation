@@ -287,7 +287,10 @@ exactly how a test string ends up in someone's editor otherwise.
   variants - `-M shift -k l -m shift` with `-s 6`/`-s 20`/`-s 30` spacing, plus `-k L` and
   `-M shift -k L` - every one produced a lowercase `l`, while plain text typing produced
   `L` correctly (36/36 byte-identical runs of a 5-capital string at `-d 0`, `6` and `12`).
-  Consequences: capitals must be left to wtype's text inference; the `shift-enter` newline
+  Consequences: capitals must be left to wtype's text inference, and the `shift-enter`
+  newline mode was **removed** on 2026-09-13 rather than shipped broken - it could only
+  emit a plain Return, which submits a prompt. An old config value now degrades to `space`
+  with one notice. The original note, for the record: the `shift-enter` newline
   mode (which sends `-M shift -k Return`) behaves like a plain Return, i.e. it SUBMITS -
   keep `DICTATE_NEWLINE=space`; and clipboard paste cannot be synthesised either, since the
   paste key is a modifier combo.

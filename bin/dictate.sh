@@ -30,7 +30,7 @@ DELIVERY="${DICTATE_DELIVERY:-type}"       # type | paste
 TYPE_DELAY="${DICTATE_TYPE_DELAY:-0}"      # ms between keystrokes
 TAIL_GRACE="${DICTATE_TAIL_GRACE:-0.5}"    # seconds to keep recording after release
 URGENCY="${DICTATE_NOTIFY_URGENCY:-normal}"
-NEWLINE_MODE="${DICTATE_NEWLINE:-space}"  # space | shift-enter | enter
+NEWLINE_MODE="${DICTATE_NEWLINE:-space}"  # space | enter (shift-enter removed, see below)
 
 MAC="${DICTATE_MAC:-}"   # required: no default host ships with the package
 # Flow's database path belongs to the REMOTE user's home, so it is never hardcoded:
@@ -53,7 +53,6 @@ now_ms() { date +%s%3N; }
 # dismissed. We exploit that: the listening toast is critical so it survives the whole
 # utterance, then we dismiss it by summary on release. No notification hub needed.
 URGENCY="${DICTATE_NOTIFY_URGENCY:-normal}"
-NEWLINE_MODE="${DICTATE_NEWLINE:-space}"  # space | shift-enter | enter
 notify() {
   local urgency="${2:-$URGENCY}" rc
   omarchy-notification-send -u "$urgency" "Dictation" "$1" >/dev/null 2>>"$NOTIFY_LOG"
@@ -151,6 +150,20 @@ ensure_chain() {
     sleep 0.2
   fi
 }
+
+# `shift-enter` was REMOVED on 2026-09-13 rather than shipped broken: wtype cannot hold a
+# modifier for a synthesized key (see the four-variant test further down), so that mode
+# could only ever emit a plain Return - which SUBMITS a chat or agent prompt. An old config
+# value is accepted and downgraded with one notice, never silently.
+case "$NEWLINE_MODE" in
+  space|enter) ;;
+  *) if [ "$NEWLINE_MODE" = "shift-enter" ] && [ ! -f /tmp/dictate-newline-warned ]; then
+       notify "DICTATE_NEWLINE=shift-enter is gone (it sent a plain Return); using space" normal
+       : > /tmp/dictate-newline-warned
+     fi
+     echo "$(date +%H:%M:%S) DICTATE_NEWLINE='$NEWLINE_MODE' -> space" >> "$NOTIFY_LOG"
+     NEWLINE_MODE=space ;;
+esac
 
 # No default host is baked in: guessing one would arm Flow and stream audio into the
 # void, which looks exactly like a working setup. Fail where the cause is obvious.
@@ -284,7 +297,6 @@ stop)
   # It also ate characters while the input box re-rendered. Normalise by default.
   case "$NEWLINE_MODE" in
     enter) ;;                                                    # raw: newlines submit
-    shift-enter) ;;                                              # handled below
     *) TXT=$(printf '%s' "$TXT" | tr -s '\n' ' ') ;;            # default: newlines -> space
   esac
 
@@ -301,16 +313,7 @@ stop)
     if [ "$TYPE_DELAY" -gt 0 ]; then wtype -d "$TYPE_DELAY" -- "$1"; else wtype -- "$1"; fi
   }
 
-  if [ "$NEWLINE_MODE" = "shift-enter" ]; then
-    first=1
-    while IFS= read -r line; do
-      [ "$first" -eq 1 ] || wtype -M shift -k Return -m shift
-      [ -n "$line" ] && type_seg "$line "
-      first=0
-    done <<< "$TXT"
-  else
-    type_seg "$TXT "
-  fi
+  type_seg "$TXT "
   T2=$(now_ms)
   echo "release_to_row=$(( T1 - T0 ))ms row_to_typed=$(( T2 - T1 ))ms total=$(( T2 - T0 ))ms chars=${#TXT}" >> "$TIMING"
   notify_dismiss

@@ -274,7 +274,7 @@ DICTATE_NOTIFY_URGENCY=normal
 
 # How to handle paragraph breaks. A newline is a Return keystroke and in a chat
 # or agent prompt Return SUBMITS, so "space" is the safe default.
-# space | shift-enter | enter
+# space | enter
 DICTATE_NEWLINE=space
 
 # The real mic's SOFTWARE fader while dictating. The Dictation Mic is built from
